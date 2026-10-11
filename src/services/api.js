@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-// Same-origin API routes run as Vercel serverless functions with the Next app.
+// Same-origin /api requests are routed by Vercel to the Express service.
 const api = axios.create({ baseURL: process.env.NEXT_PUBLIC_API_URL || '/api', withCredentials: true })
 api.interceptors.response.use(
   (response) => response,

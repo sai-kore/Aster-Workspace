@@ -1,10 +1,10 @@
 # Aster Workspace
 
-Aster Workspace is a Notion-inspired writing and organization application for capturing ideas, building nested pages, and editing rich documents. The app uses the Next.js App Router for its web interface and Vercel serverless API functions for its Express REST API. MongoDB stores users and pages.
+Aster Workspace is a Notion-inspired writing and organization application for capturing ideas, building nested pages, and editing rich documents. The app uses Next.js for its web interface and a separate Express service for its REST API. Vercel routes both services through one deployment and domain. MongoDB stores users and pages.
 
 ## Project overview
 
-This repository is designed for a **single Vercel deployment**. The frontend and API ship together; you do not need a separate backend hosting service. The API is implemented with a Next.js App Router catch-all Route Handler in `app/api/[[...path]]/route.js`. It uses the existing Mongoose models and helper utilities, so requests and database access run in Vercel serverless functions without a separate Express server.
+This repository is configured as a **Vercel multi-service project**. The `app` service runs the Next.js frontend from the repository root; the `server` service runs the Express API from `server/`. Vercel routes `/api/*` to Express and all other paths to Next.js. The duplicate Next.js catch-all API handler has been removed so there is a single deployed API implementation.
 
 ## Features
 
@@ -20,7 +20,7 @@ This repository is designed for a **single Vercel deployment**. The frontend and
 - **Web:** Next.js 15, React 19, App Router, JavaScript
 - **Editor:** Tiptap
 - **UI:** Tailwind CSS, Lucide React, Zustand
-- **API:** Next.js App Router Route Handler (Vercel Node.js function)
+- **API:** Express service (`server/src/app.js`)
 - **Database:** MongoDB with Mongoose
 - **Authentication:** JWT in an HTTP-only cookie
 - **Hosting:** Vercel (web + API), MongoDB Atlas (database)
@@ -61,7 +61,7 @@ This repository is designed for a **single Vercel deployment**. The frontend and
    npm run dev
    ```
 
-6. Open [http://localhost:3000](http://localhost:3000). The API is available on the same origin under `/api`, including `/api/health`. The API uses MongoDB Atlas and requires `MONGO_URI` and `JWT_SECRET` to be set before requests can succeed.
+6. Open [http://localhost:3000](http://localhost:3000). For local development, run the Next.js frontend and Express API in separate terminals. Start the API with `cd server && npm install && npm run dev`, then start Next.js from the repository root with `npm run dev`. Set `NEXT_PUBLIC_API_URL=http://localhost:5001/api` in `.env.local` for local development; production uses the same-origin `/api` route through Vercel.
 
 ## Environment variables
 
@@ -74,22 +74,24 @@ This repository is designed for a **single Vercel deployment**. The frontend and
 
 Do not commit `.env.local` or real credentials. Do not use a `NEXT_PUBLIC_` prefix for database credentials or JWT secrets; those values must remain server-only. The client uses `/api` by default, so `NEXT_PUBLIC_API_URL` is normally unnecessary.
 
-## Deploy the entire application to Vercel
+## Deploy the multi-service application to Vercel
 
-1. Push this repository to GitHub.
-2. In Vercel, select **Add New → Project** and import the repository.
-3. Set the **Root Directory** to the repository root (the directory containing this `package.json` and `next.config.mjs`).
-4. Use the Next.js framework preset. The default build command (`npm run build`) and output settings should be detected automatically.
-5. In **Project → Settings → Environment Variables**, add:
+1. Push this repository to GitHub and import it into Vercel as one project.
+2. Keep the project root at the repository root (the directory containing this `package.json`, `next.config.mjs`, and `vercel.json`). Do not set the Vercel project root to `server/`.
+3. `vercel.json` declares `app` (Next.js, root `.`) and `server` (Express, root `server`, entrypoint `src/app.js`). It routes `/api/*` to `server` and all other paths to `app`.
+4. In **Project → Settings → Environment Variables**, add the following for the API service (and for the app service only if any future server-side code needs them):
    - `MONGO_URI`: your MongoDB Atlas connection string
    - `JWT_SECRET`: a long, unique random secret
    - optionally `JWT_EXPIRES_IN`
-6. In MongoDB Atlas, allow network access from Vercel. For a quick initial setup, Atlas may permit `0.0.0.0/0`, but restrict access where your deployment/networking setup allows it and always use strong database credentials.
-7. Deploy. Test registration, login, page creation/editing, search, trash/restore, and logout on the deployed URL.
+5. In MongoDB Atlas, allow network access from Vercel. For a quick initial setup, Atlas may permit `0.0.0.0/0`, but restrict access where your deployment/networking setup allows it and always use strong database credentials.
+6. Deploy. Test registration, login, page creation/editing, search, trash/restore, and logout on the deployed URL.
 
-### How the API runs on Vercel
+### How services and routing work on Vercel
 
-`app/api/[[...path]]/route.js` implements the application API as Next.js App Router Route Handlers, including authentication and page CRUD operations. The legacy Express server files are retained for reference and local compatibility, but they are not used by the Vercel deployment. The handler connects to MongoDB on demand and reuses the Mongoose connection across warm invocations. No separate Express server process is required for the deployed app.
+- `app` is the Next.js frontend service.
+- `server` is the Express API service, exposed through the `/api/*` rewrite.
+- The browser calls the same-origin `/api` path. No service binding is needed for this browser-to-public-route flow; Vercel routing handles it. Add a binding only if server-side code in one service directly calls another service's internal URL.
+- `server/src/app.js` connects to MongoDB through cached Mongoose connection middleware, so it works as a Vercel Express entrypoint and from the local server launcher.
 
 Serverless functions have execution-time and connection limits. This API is request/response based and does not require a persistent server. If you later add WebSockets, in-memory background jobs, or long-running workers, move those workloads to a service designed to run continuously or use a managed queue.
 
