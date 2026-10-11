@@ -1,0 +1,164 @@
+import Page, { emptyDoc } from '../models/Page.js'
+import ApiError from '../utils/apiError.js'
+import asyncHandler from '../utils/asyncHandler.js'
+import { extractText, escapeRegex, buildSnippet } from '../utils/tiptapText.js'
+import collectDescendantIds from '../utils/pageTree.js'
+
+export const getPages = asyncHandler(async (req, res) => {
+  const pages = await Page.find({ owner: req.user.id, isDeleted: false })
+    .select('title icon parentPage isFavorite createdAt updatedAt')
+    .sort({ createdAt: 1 })
+    .lean()
+  res.json({ success: true, data: { pages } })
+})
+
+export const getTrash = asyncHandler(async (req, res) => {
+  const pages = await Page.find({ owner: req.user.id, isDeleted: true })
+    .select('title icon parentPage deletedAt updatedAt')
+    .sort({ deletedAt: -1 })
+    .lean()
+  res.json({ success: true, data: { pages } })
+})
+
+export const getPage = asyncHandler(async (req, res) => {
+  const page = await Page.findOne({ _id: req.params.id, owner: req.user.id }).lean()
+  if (!page) throw new ApiError(404, 'Page not found')
+  res.json({ success: true, data: { page } })
+})
+
+export const createPage = asyncHandler(async (req, res) => {
+  const { title, icon, content, parentPage } = req.body
+
+  if (parentPage) {
+    const parent = await Page.findOne({ _id: parentPage, owner: req.user.id, isDeleted: false })
+      .select('_id')
+      .lean()
+    if (!parent) throw new ApiError(400, 'Parent page not found')
+  }
+
+  const doc = {
+    title: title?.trim() || 'Untitled',
+    icon: icon || '📄',
+    parentPage: parentPage || null,
+    owner: req.user.id,
+  }
+  if (content) {
+    doc.content = content
+    doc.contentText = extractText(content)
+  }
+
+  const page = await Page.create(doc)
+  res.status(201).json({ success: true, data: { page } })
+})
+
+export const updatePage = asyncHandler(async (req, res) => {
+  const { title, icon, content } = req.body
+
+  const update = {}
+  if (title !== undefined) update.title = title.trim() || 'Untitled'
+  if (icon !== undefined) update.icon = icon
+  if (content !== undefined) {
+    update.content = content
+    update.contentText = extractText(content)
+  }
+  if (Object.keys(update).length === 0) throw new ApiError(400, 'Nothing to update')
+
+  const page = await Page.findOneAndUpdate(
+    { _id: req.params.id, owner: req.user.id, isDeleted: false },
+    update,
+    { new: true }
+  ).lean()
+  if (!page) throw new ApiError(404, 'Page not found')
+
+  res.json({ success: true, data: { page } })
+})
+
+export const toggleFavorite = asyncHandler(async (req, res) => {
+  const page = await Page.findOne({ _id: req.params.id, owner: req.user.id, isDeleted: false })
+  if (!page) throw new ApiError(404, 'Page not found')
+  page.isFavorite = !page.isFavorite
+  await page.save()
+  res.json({ success: true, data: { page: page.toObject() } })
+})
+
+export const deletePage = asyncHandler(async (req, res) => {
+  const page = await Page.findOne({ _id: req.params.id, owner: req.user.id, isDeleted: false })
+  if (!page) throw new ApiError(404, 'Page not found')
+
+  // Soft-delete the page and its entire subtree
+  const descendantIds = await collectDescendantIds(req.user.id, page._id, false)
+  const ids = [page._id, ...descendantIds]
+  await Page.updateMany({ _id: { $in: ids }, owner: req.user.id }, { $set: { isDeleted: true, deletedAt: new Date() } })
+
+  res.json({ success: true, data: { deletedCount: ids.length } })
+})
+
+export const restorePage = asyncHandler(async (req, res) => {
+  const page = await Page.findOne({ _id: req.params.id, owner: req.user.id, isDeleted: true })
+  if (!page) throw new ApiError(404, 'Page not found in trash')
+
+  const descendantIds = await collectDescendantIds(req.user.id, page._id, true)
+  await Page.updateMany(
+    { _id: { $in: [page._id, ...descendantIds] }, owner: req.user.id },
+    { $set: { isDeleted: false, deletedAt: null } }
+  )
+
+  // If the restored page's parent is gone (still trashed or permanently deleted),
+  // detach it to the workspace root so it never becomes unreachable.
+  if (page.parentPage) {
+    const parent = await Page.findOne({ _id: page.parentPage, owner: req.user.id, isDeleted: false })
+      .select('_id')
+      .lean()
+    if (!parent) await Page.updateOne({ _id: page._id }, { $set: { parentPage: null } })
+  }
+
+  res.json({ success: true, data: { restoredCount: 1 + descendantIds.length } })
+})
+
+export const duplicatePage = asyncHandler(async (req, res) => {
+  const original = await Page.findOne({ _id: req.params.id, owner: req.user.id, isDeleted: false }).lean()
+  if (!original) throw new ApiError(404, 'Page not found')
+
+  const copy = await Page.create({
+    title: `${original.title} (copy)`,
+    icon: original.icon,
+    content: original.content ?? emptyDoc(),
+    contentText: original.contentText,
+    parentPage: original.parentPage,
+    owner: req.user.id,
+  })
+  res.status(201).json({ success: true, data: { page: copy } })
+})
+
+export const permanentDelete = asyncHandler(async (req, res) => {
+  const page = await Page.findOne({ _id: req.params.id, owner: req.user.id, isDeleted: true })
+  if (!page) throw new ApiError(404, 'Page not found in trash')
+
+  const descendantIds = await collectDescendantIds(req.user.id, page._id, true)
+  const { deletedCount } = await Page.deleteMany({ _id: { $in: [page._id, ...descendantIds] }, owner: req.user.id })
+  res.json({ success: true, data: { deletedCount } })
+})
+
+export const emptyTrash = asyncHandler(async (req, res) => {
+  const { deletedCount } = await Page.deleteMany({ owner: req.user.id, isDeleted: true })
+  res.json({ success: true, data: { deletedCount } })
+})
+
+export const searchPages = asyncHandler(async (req, res) => {
+  const q = String(req.query.q || '').trim().slice(0, 100)
+  if (!q) return res.json({ success: true, data: { pages: [] } })
+
+  const regex = new RegExp(escapeRegex(q), 'i')
+  const pages = await Page.find({
+    owner: req.user.id,
+    isDeleted: false,
+    $or: [{ title: regex }, { contentText: regex }],
+  })
+    .select('title icon contentText updatedAt')
+    .sort({ updatedAt: -1 })
+    .limit(20)
+    .lean()
+
+  const results = pages.map(({ contentText, ...page }) => ({ ...page, snippet: buildSnippet(contentText, q) }))
+  res.json({ success: true, data: { pages: results } })
+})
